@@ -4,54 +4,71 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>IL2CPP Offset Viewer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
-  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#c9d1d9; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; }
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#c9d1d9; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
   * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif; padding:24px; line-height:1.5; }
+  body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif; padding:24px; line-height:1.5; max-width:1000px; margin:0 auto; }
   h1 { font-size:20px; font-weight:600; margin-bottom:4px; }
   .sub { color:var(--dim); font-size:13px; margin-bottom:20px; }
-  .drop { border:2px dashed var(--border); border-radius:8px; padding:32px; text-align:center; cursor:pointer; transition:.2s; background:var(--panel); margin-bottom:12px; }
+  .drop { border:2px dashed var(--border); border-radius:8px; padding:28px; text-align:center; cursor:pointer; transition:.2s; background:var(--panel); margin-bottom:12px; }
   .drop:hover, .drop.over { border-color:var(--accent); background:#1c2128; }
   .drop.ok { border-color:var(--ok); }
   .drop .name { color:var(--accent); font-weight:600; margin-top:6px; font-size:13px; word-break:break-all; }
   .drop .hint { color:var(--dim); font-size:12px; margin-top:4px; }
   input[type=file] { display:none; }
-  .controls { display:flex; gap:8px; margin:16px 0; flex-wrap:wrap; }
-  input[type=text] { flex:1; min-width:200px; background:var(--panel); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:6px; font-size:13px; }
+  .row { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  input[type=text] { flex:1; min-width:220px; background:var(--panel); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:6px; font-size:13px; font-family:inherit; }
   input[type=text]:focus { outline:none; border-color:var(--accent); }
   button { background:var(--accent); color:#0d1117; border:none; padding:8px 16px; border-radius:6px; font-weight:600; font-size:13px; cursor:pointer; }
   button:disabled { background:var(--border); color:var(--dim); cursor:not-allowed; }
   button.ghost { background:transparent; color:var(--text); border:1px solid var(--border); }
+  button.warn { background:var(--warn); }
   .status { font-size:12px; color:var(--dim); margin:8px 0; min-height:18px; }
-  .status.err { color:#f85149; }
+  .status.err { color:var(--err); }
   .status.ok { color:var(--ok); }
+  .status.warn { color:var(--warn); }
   .out { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; max-height:60vh; overflow:auto; font-family:'Consolas','Courier New',monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; }
-  .out .cls { color:var(--accent); font-weight:600; }
-  .out .mtd { color:var(--text); padding-left:16px; }
-  .out .off { color:var(--warn); }
+  .out .cls { color:var(--accent); font-weight:600; padding:2px 0; }
   .out .ns { color:var(--dim); }
   .count { color:var(--dim); font-size:11px; margin-bottom:8px; }
+  .tabs { display:flex; gap:4px; margin-bottom:12px; }
+  .tab { flex:1; padding:8px; text-align:center; background:var(--panel); border:1px solid var(--border); border-radius:6px; cursor:pointer; font-size:13px; color:var(--dim); }
+  .tab.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .panel { display:none; } .panel.active { display:block; }
+  .progress { height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin:8px 0; display:none; }
+  .progress.active { display:block; }
+  .progress > div { height:100%; background:var(--accent); width:0%; transition:width .2s; }
 </style>
 </head>
 <body>
 <h1>IL2CPP Offset Viewer</h1>
-<div class="sub">Kéo <code>libil2cpp.so</code> + <code>global-metadata.dat</code> vào. Xử lý tại chỗ, không upload.</div>
+<div class="sub">Kéo APK / .so / metadata, hoặc dán link APK. Xử lý tại chỗ trong trình duyệt, không upload.</div>
 
-<div class="drop" id="dropSo">
-  <div>📦 Kéo <b>libil2cpp.so</b> vào đây</div>
-  <div class="hint">hoặc bấm để chọn</div>
-  <div class="name" id="nameSo"></div>
+<div class="tabs">
+  <div class="tab active" data-tab="file">📁 Kéo file</div>
+  <div class="tab" data-tab="link">🔗 Dán link</div>
 </div>
-<input type="file" id="fileSo" accept=".so">
 
-<div class="drop" id="dropMd">
-  <div>📄 Kéo <b>global-metadata.dat</b> vào đây</div>
-  <div class="hint">hoặc bấm để chọn</div>
-  <div class="name" id="nameMd"></div>
+<div class="panel active" id="panel-file">
+  <div class="drop" id="drop">
+    <div>📦 Kéo <b>APK</b> (hoặc <b>libil2cpp.so</b> + <b>global-metadata.dat</b>) vào đây</div>
+    <div class="hint">hoặc bấm để chọn — nhận nhiều file cùng lúc</div>
+    <div class="name" id="name"></div>
+  </div>
+  <input type="file" id="file" multiple accept=".apk,.so,.dat">
 </div>
-<input type="file" id="fileMd" accept=".dat">
 
-<div class="controls">
+<div class="panel" id="panel-link">
+  <div class="row">
+    <input type="text" id="url" placeholder="https://.../base.apk hoặc split_config.arm64_v8a.apk">
+    <button id="btnFetch">Tải</button>
+  </div>
+  <div class="sub" style="font-size:12px;">Dùng CORS proxy công khai — có thể chậm, có thể chết. APK trên host chặn CORS sẽ không tải được.</div>
+  <div class="progress" id="prog"><div id="progBar"></div></div>
+</div>
+
+<div class="row">
   <input type="text" id="kw" placeholder="Keyword: Player, Camera, Weapon..." value="Player">
   <button id="btnScan" disabled>Scan</button>
   <button id="btnClear" class="ghost">Clear</button>
@@ -62,78 +79,195 @@
 <div class="out" id="out"></div>
 
 <script>
-let bufSo = null, bufMd = null;
+// ====== State ======
+const state = {
+  so: null,      // Uint8Array
+  md: null,      // Uint8Array
+  apkName: '',
+  soName: '',
+  mdName: '',
+};
 const $ = id => document.getElementById(id);
 
-function bindDrop(dropId, inputId, nameId, setter) {
-  const drop = $(dropId), input = $(inputId);
-  drop.onclick = () => input.click();
-  drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
-  drop.ondragleave = () => drop.classList.remove('over');
-  drop.ondrop = e => {
-    e.preventDefault(); drop.classList.remove('over');
-    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0], drop, $(nameId), setter);
+// ====== Tabs ======
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('panel-' + t.dataset.tab).classList.add('active');
   };
-  input.onchange = () => { if (input.files[0]) handleFile(input.files[0], drop, $(nameId), setter); };
+});
+
+// ====== Drop + file input ======
+const drop = $('drop'), fileInput = $('file');
+drop.onclick = () => fileInput.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => {
+  e.preventDefault(); drop.classList.remove('over');
+  handleFiles([...e.dataTransfer.files]);
+};
+fileInput.onchange = () => handleFiles([...fileInput.files]);
+
+async function handleFiles(files) {
+  if (!files.length) return;
+  $('status').className = 'status';
+  $('status').textContent = 'Đang xử lý...';
+
+  for (const f of files) {
+    const lower = f.name.toLowerCase();
+    if (lower.endsWith('.apk')) {
+      await handleApk(f);
+    } else if (lower.endsWith('.so')) {
+      state.so = new Uint8Array(await f.arrayBuffer());
+      state.soName = f.name;
+    } else if (lower.endsWith('.dat')) {
+      state.md = new Uint8Array(await f.arrayBuffer());
+      state.mdName = f.name;
+    }
+  }
+  renderFileNames();
+  checkReady();
 }
 
-function handleFile(file, drop, nameEl, setter) {
-  const r = new FileReader();
-  r.onload = () => {
-    setter(new Uint8Array(r.result));
-    nameEl.textContent = file.name + ' — ' + (file.size/1024/1024).toFixed(1) + ' MB';
-    drop.classList.add('ok');
-    checkReady();
-  };
-  r.readAsArrayBuffer(file);
+function renderFileNames() {
+  const parts = [];
+  if (state.apkName) parts.push('APK: ' + state.apkName);
+  if (state.soName) parts.push('so: ' + state.soName);
+  if (state.mdName) parts.push('metadata: ' + state.mdName);
+  $('name').textContent = parts.join(' | ');
+  if (parts.length) drop.classList.add('ok');
 }
 
+// ====== APK unzip (JSZip) ======
+async function handleApk(file) {
+  $('status').textContent = `Đang unzip ${file.name} (${(file.size/1024/1024).toFixed(1)} MB)...`;
+  const zip = await JSZip.loadAsync(file);
+  state.apkName = file.name;
+
+  // tìm libil2cpp.so — ưu tiên arm64-v8a
+  let soEntry = null, mdEntry = null;
+  zip.forEach((path, entry) => {
+    if (entry.dir) return;
+    if (path.endsWith('lib/arm64-v8a/libil2cpp.so')) soEntry = entry;
+    else if (!soEntry && path.endsWith('lib/armeabi-v7a/libil2cpp.so')) soEntry = entry;
+    if (path.endsWith('assets/bin/Data/Managed/Metadata/global-metadata.dat')) mdEntry = entry;
+  });
+
+  if (!soEntry) {
+    $('status').className = 'status err';
+    $('status').textContent = 'APK này không chứa libil2cpp.so — có thể là split APK. Hãy kéo thêm split_config.arm64_v8a.apk.';
+    return;
+  }
+  if (!mdEntry) {
+    $('status').className = 'status err';
+    $('status').textContent = 'APK này không chứa global-metadata.dat — cần thêm split APK hoặc base.apk đầy đủ.';
+    return;
+  }
+
+  $('status').textContent = 'Đang đọc libil2cpp.so từ APK...';
+  state.so = await soEntry.async('uint8array');
+  state.soName = soEntry.name.split('/').pop();
+
+  $('status').textContent = 'Đang đọc global-metadata.dat từ APK...';
+  state.md = await mdEntry.async('uint8array');
+  state.mdName = mdEntry.name.split('/').pop();
+
+  $('status').className = 'status ok';
+  $('status').textContent = `✓ Đã tách từ APK: ${state.soName} (${(state.so.length/1024/1024).toFixed(1)} MB) + ${state.mdName} (${(state.md.length/1024).toFixed(0)} KB)`;
+}
+
+// ====== Link fetch qua CORS proxy ======
+$('btnFetch').onclick = async () => {
+  const url = $('url').value.trim();
+  if (!url) return;
+  const prog = $('prog'), bar = $('progBar');
+  prog.classList.add('active'); bar.style.width = '0%';
+  $('status').className = 'status';
+  $('status').textContent = 'Đang tải qua proxy...';
+
+  // Thử lần lượt các proxy công khai
+  const proxies = [
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    u => `https://thingproxy.freeboard.io/fetch/${u}`,
+  ];
+
+  let lastErr = null;
+  for (const p of proxies) {
+    try {
+      const res = await fetch(p(url));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      // đọc stream để có progress
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      const total = +res.headers.get('content-length') || 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (total) bar.style.width = (received/total*100).toFixed(1) + '%';
+      }
+      const buf = new Uint8Array(received);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+
+      // giả lập File object
+      const fakeName = url.split('/').pop().split('?')[0] || 'download.apk';
+      const fakeFile = new File([buf], fakeName);
+      if (fakeName.toLowerCase().endsWith('.apk')) {
+        await handleApk(fakeFile);
+      } else if (fakeName.toLowerCase().endsWith('.so')) {
+        state.so = buf; state.soName = fakeName;
+      } else if (fakeName.toLowerCase().endsWith('.dat')) {
+        state.md = buf; state.mdName = fakeName;
+      } else {
+        // thử coi như APK
+        await handleApk(fakeFile);
+      }
+      renderFileNames(); checkReady();
+      prog.classList.remove('active');
+      return;
+    } catch (e) {
+      lastErr = e;
+      bar.style.width = '0%';
+    }
+  }
+  prog.classList.remove('active');
+  $('status').className = 'status err';
+  $('status').textContent = 'Tải thất bại qua mọi proxy: ' + (lastErr?.message || 'unknown') + '. Thử kéo file tay.';
+};
+
+// ====== Scan ======
 function checkReady() {
-  const ready = bufSo && bufMd;
-  $('btnScan').disabled = !ready;
-  if (ready) $('status').textContent = 'Sẵn sàng. Nhập keyword rồi Scan.';
+  $('btnScan').disabled = !(state.so && state.md);
+  if (state.so && state.md) $('status').textContent = 'Sẵn sàng. Nhập keyword rồi Scan.';
 }
 
-bindDrop('dropSo','fileSo','nameSo', b => bufSo = b);
-bindDrop('dropMd','fileMd','nameMd', b => bufMd = b);
-
-// IL2CPP global-metadata magic: 0xFAB11BAF (little-endian: AF 1B B1 FA)
 function checkMetadataMagic(buf) {
   if (buf.length < 4) return false;
   const magic = buf[0] | (buf[1]<<8) | (buf[2]<<16) | (buf[3]<<24);
   return (magic >>> 0) === 0xFAB11BAF;
 }
 
-// Trích string ASCII có độ dài >= minLen từ buffer — dùng cho .so
 function extractStrings(buf, minLen=4) {
   const out = new Set();
   let cur = [];
   for (let i=0; i<buf.length; i++) {
     const c = buf[i];
-    if (c >= 0x20 && c < 0x7f) {
-      cur.push(c);
-    } else {
-      if (cur.length >= minLen) {
-        out.add(String.fromCharCode(...cur));
-      }
-      cur = [];
-    }
+    if (c >= 0x20 && c < 0x7f) cur.push(c);
+    else { if (cur.length >= minLen) out.add(String.fromCharCode(...cur)); cur = []; }
   }
   if (cur.length >= minLen) out.add(String.fromCharCode(...cur));
   return out;
 }
 
-// Tìm class/method trong metadata: parse sơ bộ string table
-// IL2CPP metadata header (không mã hóa):
-//   offset 0: magic (4)
-//   offset 4: version (4)
-//   offset 8: stringLiteralOffset (4)
-//   ... nhiều trường khác
-// String table (stringOffset, stringSize) nằm ở header offset 0x18 và 0x1C
-// Đây là parse tối giản — đủ để lấy tên class cho bản metadata không mã hóa
 function parseMetadataStrings(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   if (buf.length < 0x20) return [];
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const strOff = view.getUint32(0x18, true);
   const strSize = view.getUint32(0x1C, true);
   if (strOff + strSize > buf.length || strSize === 0) return [];
@@ -145,9 +279,7 @@ function parseMetadataStrings(buf) {
     while (j < end && buf[j] !== 0) j++;
     if (j > i) {
       let s = '';
-      for (let k=i; k<j; k++) {
-        if (buf[k] >= 0x20 && buf[k] < 0x7f) s += String.fromCharCode(buf[k]);
-      }
+      for (let k=i; k<j; k++) if (buf[k] >= 0x20 && buf[k] < 0x7f) s += String.fromCharCode(buf[k]);
       if (s.length >= 2) strings.push(s);
     }
     i = j + 1;
@@ -155,83 +287,70 @@ function parseMetadataStrings(buf) {
   return strings;
 }
 
-function scan() {
+$('btnScan').onclick = () => {
   const kw = $('kw').value.trim().toLowerCase();
   const out = $('out'), status = $('status'), countEl = $('count');
   out.innerHTML = ''; countEl.textContent = '';
   status.className = 'status';
 
-  if (!bufSo || !bufMd) { status.textContent = 'Thiếu file.'; status.className='status err'; return; }
+  if (!state.so || !state.md) { status.textContent='Thiếu file.'; status.className='status err'; return; }
 
-  // Kiểm tra metadata có bị mã hóa không
-  const validMeta = checkMetadataMagic(bufMd);
+  const validMeta = checkMetadataMagic(state.md);
   if (!validMeta) {
-    status.textContent = '⚠ Metadata KHÔNG có magic 0xFAB11BAF — có thể bị mã hóa (FF Striped XOR). Đang fallback: scan string từ .so.';
-    status.className = 'status err';
+    status.textContent = '⚠ Metadata không có magic — có thể bị mã hóa. Fallback: scan string từ .so.';
+    status.className = 'status warn';
   } else {
     status.textContent = '✓ Metadata hợp lệ. Đang parse...';
     status.className = 'status ok';
   }
 
-  // Chạy async để không block UI
   setTimeout(() => {
-    let classNames = [];
-    if (validMeta) {
-      classNames = parseMetadataStrings(bufMd);
-    }
-    // Luôn scan .so để bổ sung
-    const soStrings = extractStrings(bufSo, 4);
-    const allStrings = new Set([...classNames, ...soStrings]);
+    let classNames = validMeta ? parseMetadataStrings(state.md) : [];
+    const soStrings = extractStrings(state.so, 4);
+    const all = new Set([...classNames, ...soStrings]);
 
-    // Lọc theo keyword
     const matches = [];
-    for (const s of allStrings) {
-      if (s.toLowerCase().includes(kw)) {
-        matches.push(s);
-      }
-    }
+    for (const s of all) if (s.toLowerCase().includes(kw)) matches.push(s);
     matches.sort((a,b) => a.length - b.length);
 
-    if (matches.length === 0) {
+    if (!matches.length) {
       status.textContent = `Không tìm thấy string chứa "${kw}".`;
       status.className = 'status err';
       return;
     }
 
-    countEl.textContent = `${matches.length} string khớp "${kw}" (tổng ${allStrings.size} string quét được)`;
-    status.textContent = validMeta ? '✓ Hoàn tất.' : '⚠ Hoàn tất (metadata mã hóa — chỉ string từ .so).';
-    status.className = validMeta ? 'status ok' : 'status err';
+    countEl.textContent = `${matches.length} string khớp "${kw}" / ${all.size} tổng`;
+    status.textContent = validMeta ? '✓ Hoàn tất.' : '⚠ Hoàn tất (chỉ string .so).';
+    status.className = validMeta ? 'status ok' : 'status warn';
 
-    // Render
     const frag = document.createDocumentFragment();
-    const MAX_SHOW = 500;
-    for (let i=0; i<Math.min(matches.length, MAX_SHOW); i++) {
-      const div = document.createElement('div');
-      div.className = 'cls';
-      div.textContent = matches[i];
-      frag.appendChild(div);
+    const MAX = 500;
+    for (let i=0; i<Math.min(matches.length, MAX); i++) {
+      const d = document.createElement('div');
+      d.className = 'cls'; d.textContent = matches[i];
+      frag.appendChild(d);
     }
-    if (matches.length > MAX_SHOW) {
-      const more = document.createElement('div');
-      more.className = 'ns';
-      more.textContent = `... và ${matches.length - MAX_SHOW} string nữa (bị cắt để không treo trình duyệt)`;
-      frag.appendChild(more);
+    if (matches.length > MAX) {
+      const d = document.createElement('div');
+      d.className = 'ns';
+      d.textContent = `... và ${matches.length-MAX} nữa (cắt bớt)`;
+      frag.appendChild(d);
     }
     out.appendChild(frag);
   }, 50);
-}
+};
 
-$('btnScan').onclick = scan;
 $('btnClear').onclick = () => {
-  bufSo = bufMd = null;
-  $('nameSo').textContent = ''; $('nameMd').textContent = '';
-  $('dropSo').classList.remove('ok'); $('dropMd').classList.remove('ok');
+  state.so = state.md = null;
+  state.apkName = state.soName = state.mdName = '';
+  $('name').textContent = '';
+  drop.classList.remove('ok');
   $('out').innerHTML = ''; $('count').textContent = '';
   $('status').textContent = 'Chưa có file.'; $('status').className = 'status';
   $('btnScan').disabled = true;
-  $('fileSo').value = ''; $('fileMd').value = '';
+  fileInput.value = ''; $('url').value = '';
 };
-$('kw').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('btnScan').disabled) scan(); });
+$('kw').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('btnScan').disabled) $('btnScan').click(); });
 </script>
 </body>
 </html>
