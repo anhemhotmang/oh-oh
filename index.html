@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IL2CPP Offset Viewer</title>
+<title>IL2CPP Offset Viewer — Fast</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#c9d1d9; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
@@ -18,17 +18,14 @@
   .drop .hint { color:var(--dim); font-size:12px; margin-top:4px; }
   input[type=file] { display:none; }
   .row { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
-  input[type=text] { flex:1; min-width:220px; background:var(--panel); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:6px; font-size:13px; font-family:inherit; }
+  input[type=text] { flex:1; min-width:220px; background:var(--panel); border:1px solid var(--border); color:var(--text); padding:8px 12px; border-radius:6px; font-size:13px; }
   input[type=text]:focus { outline:none; border-color:var(--accent); }
   button { background:var(--accent); color:#0d1117; border:none; padding:8px 16px; border-radius:6px; font-weight:600; font-size:13px; cursor:pointer; }
   button:disabled { background:var(--border); color:var(--dim); cursor:not-allowed; }
   button.ghost { background:transparent; color:var(--text); border:1px solid var(--border); }
-  button.warn { background:var(--warn); }
   .status { font-size:12px; color:var(--dim); margin:8px 0; min-height:18px; }
-  .status.err { color:var(--err); }
-  .status.ok { color:var(--ok); }
-  .status.warn { color:var(--warn); }
-  .out { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; max-height:60vh; overflow:auto; font-family:'Consolas','Courier New',monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .status.err { color:var(--err); } .status.ok { color:var(--ok); } .status.warn { color:var(--warn); }
+  .out { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; max-height:60vh; overflow:auto; font-family:'Consolas',monospace; font-size:12px; white-space:pre-wrap; word-break:break-all; }
   .out .cls { color:var(--accent); font-weight:600; padding:2px 0; }
   .out .ns { color:var(--dim); }
   .count { color:var(--dim); font-size:11px; margin-bottom:8px; }
@@ -39,11 +36,12 @@
   .progress { height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin:8px 0; display:none; }
   .progress.active { display:block; }
   .progress > div { height:100%; background:var(--accent); width:0%; transition:width .2s; }
+  .timer { color:var(--dim); font-size:11px; }
 </style>
 </head>
 <body>
 <h1>IL2CPP Offset Viewer</h1>
-<div class="sub">Kéo APK / .so / metadata, hoặc dán link APK. Xử lý tại chỗ trong trình duyệt, không upload.</div>
+<div class="sub">Kéo APK / .so / metadata, hoặc dán link. Xử lý tại chỗ, không upload.</div>
 
 <div class="tabs">
   <div class="tab active" data-tab="file">📁 Kéo file</div>
@@ -52,8 +50,8 @@
 
 <div class="panel active" id="panel-file">
   <div class="drop" id="drop">
-    <div>📦 Kéo <b>APK</b> (hoặc <b>libil2cpp.so</b> + <b>global-metadata.dat</b>) vào đây</div>
-    <div class="hint">hoặc bấm để chọn — nhận nhiều file cùng lúc</div>
+    <div>📦 Kéo <b>APK</b> hoặc <b>libil2cpp.so</b> + <b>global-metadata.dat</b></div>
+    <div class="hint">nhận nhiều file cùng lúc</div>
     <div class="name" id="name"></div>
   </div>
   <input type="file" id="file" multiple accept=".apk,.so,.dat">
@@ -61,10 +59,10 @@
 
 <div class="panel" id="panel-link">
   <div class="row">
-    <input type="text" id="url" placeholder="https://.../base.apk hoặc split_config.arm64_v8a.apk">
+    <input type="text" id="url" placeholder="https://.../base.apk hoặc .so">
     <button id="btnFetch">Tải</button>
   </div>
-  <div class="sub" style="font-size:12px;">Dùng CORS proxy công khai — có thể chậm, có thể chết. APK trên host chặn CORS sẽ không tải được.</div>
+  <div class="sub" style="font-size:12px;">Proxy công khai — chậm/chết định kỳ, không tải nổi file >100MB.</div>
   <div class="progress" id="prog"><div id="progBar"></div></div>
 </div>
 
@@ -79,14 +77,72 @@
 <div class="out" id="out"></div>
 
 <script>
-// ====== State ======
-const state = {
-  so: null,      // Uint8Array
-  md: null,      // Uint8Array
-  apkName: '',
-  soName: '',
-  mdName: '',
+// ====== Web Worker inline (blob URL) — scan chạy nền ======
+const workerSrc = `
+self.onmessage = (e) => {
+  const { so, md, kw, validMeta } = e.data;
+  const t0 = performance.now();
+  const strings = new Set();
+  let classCount = 0;
+
+  // parse metadata nếu hợp lệ
+  if (validMeta && md) {
+    const view = new DataView(md.buffer, md.byteOffset, md.byteLength);
+    const strOff = view.getUint32(0x18, true);
+    const strSize = view.getUint32(0x1C, true);
+    if (strOff + strSize <= md.length && strSize > 0) {
+      const end = strOff + strSize;
+      let i = strOff;
+      while (i < end) {
+        let j = i;
+        while (j < end && md[j] !== 0) j++;
+        if (j > i) {
+          const s = new TextDecoder('utf-8', {fatal:false}).decode(md.subarray(i, j));
+          if (s.length >= 2 && /^[\\x20-\\x7e]+$/.test(s)) strings.add(s);
+        }
+        i = j + 1;
+      }
+      classCount = strings.size;
+    }
+  }
+
+  // scan .so bằng TextDecoder trên chunk lớn — nhanh hơn loop từng byte
+  // chia 4MB chunk, giải mã latin1, tách theo ký tự không in được
+  if (so && so.length > 0) {
+    const CHUNK = 4 * 1024 * 1024;
+    const dec = new TextDecoder('latin1');
+    for (let off = 0; off < so.length; off += CHUNK) {
+      const slice = so.subarray(off, Math.min(off + CHUNK, so.length));
+      const txt = dec.decode(slice);
+      // regex string ASCII >= 4 ký tự
+      const re = /[\\x20-\\x7e]{4,}/g;
+      let m;
+      while ((m = re.exec(txt)) !== null) strings.add(m[0]);
+      self.postMessage({ type: 'progress', pct: Math.round((off + slice.length) / so.length * 100) });
+    }
+  }
+
+  // lọc keyword
+  const kwLower = kw.toLowerCase();
+  const matches = [];
+  for (const s of strings) {
+    if (s.toLowerCase().includes(kwLower)) matches.push(s);
+  }
+  matches.sort((a,b) => a.length - b.length);
+
+  self.postMessage({
+    type: 'done',
+    matches,
+    total: strings.size,
+    classCount,
+    elapsed: performance.now() - t0,
+  });
 };
+`;
+const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type:'application/javascript' })));
+
+// ====== State ======
+const state = { so:null, md:null, apkName:'', soName:'', mdName:'' };
 const $ = id => document.getElementById(id);
 
 // ====== Tabs ======
@@ -94,59 +150,45 @@ document.querySelectorAll('.tab').forEach(t => {
   t.onclick = () => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    $('panel-' + t.dataset.tab).classList.add('active');
+    t.classList.add('active'); $('panel-' + t.dataset.tab).classList.add('active');
   };
 });
 
-// ====== Drop + file input ======
+// ====== Drop ======
 const drop = $('drop'), fileInput = $('file');
 drop.onclick = () => fileInput.click();
 drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
 drop.ondragleave = () => drop.classList.remove('over');
-drop.ondrop = e => {
-  e.preventDefault(); drop.classList.remove('over');
-  handleFiles([...e.dataTransfer.files]);
-};
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); handleFiles([...e.dataTransfer.files]); };
 fileInput.onchange = () => handleFiles([...fileInput.files]);
 
 async function handleFiles(files) {
   if (!files.length) return;
-  $('status').className = 'status';
-  $('status').textContent = 'Đang xử lý...';
-
+  const t0 = performance.now();
   for (const f of files) {
     const lower = f.name.toLowerCase();
-    if (lower.endsWith('.apk')) {
-      await handleApk(f);
-    } else if (lower.endsWith('.so')) {
-      state.so = new Uint8Array(await f.arrayBuffer());
-      state.soName = f.name;
-    } else if (lower.endsWith('.dat')) {
-      state.md = new Uint8Array(await f.arrayBuffer());
-      state.mdName = f.name;
-    }
+    if (lower.endsWith('.apk')) await handleApk(f);
+    else if (lower.endsWith('.so')) { state.so = new Uint8Array(await f.arrayBuffer()); state.soName = f.name; }
+    else if (lower.endsWith('.dat')) { state.md = new Uint8Array(await f.arrayBuffer()); state.mdName = f.name; }
   }
-  renderFileNames();
+  renderNames();
   checkReady();
+  $('status').textContent += ` (${((performance.now()-t0)/1000).toFixed(1)}s)`;
 }
 
-function renderFileNames() {
-  const parts = [];
-  if (state.apkName) parts.push('APK: ' + state.apkName);
-  if (state.soName) parts.push('so: ' + state.soName);
-  if (state.mdName) parts.push('metadata: ' + state.mdName);
-  $('name').textContent = parts.join(' | ');
-  if (parts.length) drop.classList.add('ok');
+function renderNames() {
+  const p = [];
+  if (state.apkName) p.push('APK: ' + state.apkName);
+  if (state.soName) p.push('so: ' + state.soName);
+  if (state.mdName) p.push('metadata: ' + state.mdName);
+  $('name').textContent = p.join(' | ');
+  if (p.length) drop.classList.add('ok');
 }
 
-// ====== APK unzip (JSZip) ======
 async function handleApk(file) {
-  $('status').textContent = `Đang unzip ${file.name} (${(file.size/1024/1024).toFixed(1)} MB)...`;
+  $('status').textContent = `Unzip ${file.name} (${(file.size/1024/1024).toFixed(1)} MB)...`;
   const zip = await JSZip.loadAsync(file);
   state.apkName = file.name;
-
-  // tìm libil2cpp.so — ưu tiên arm64-v8a
   let soEntry = null, mdEntry = null;
   zip.forEach((path, entry) => {
     if (entry.dir) return;
@@ -154,91 +196,55 @@ async function handleApk(file) {
     else if (!soEntry && path.endsWith('lib/armeabi-v7a/libil2cpp.so')) soEntry = entry;
     if (path.endsWith('assets/bin/Data/Managed/Metadata/global-metadata.dat')) mdEntry = entry;
   });
-
-  if (!soEntry) {
-    $('status').className = 'status err';
-    $('status').textContent = 'APK này không chứa libil2cpp.so — có thể là split APK. Hãy kéo thêm split_config.arm64_v8a.apk.';
-    return;
-  }
-  if (!mdEntry) {
-    $('status').className = 'status err';
-    $('status').textContent = 'APK này không chứa global-metadata.dat — cần thêm split APK hoặc base.apk đầy đủ.';
-    return;
-  }
-
-  $('status').textContent = 'Đang đọc libil2cpp.so từ APK...';
-  state.so = await soEntry.async('uint8array');
-  state.soName = soEntry.name.split('/').pop();
-
-  $('status').textContent = 'Đang đọc global-metadata.dat từ APK...';
-  state.md = await mdEntry.async('uint8array');
-  state.mdName = mdEntry.name.split('/').pop();
-
-  $('status').className = 'status ok';
-  $('status').textContent = `✓ Đã tách từ APK: ${state.soName} (${(state.so.length/1024/1024).toFixed(1)} MB) + ${state.mdName} (${(state.md.length/1024).toFixed(0)} KB)`;
+  if (!soEntry) { $('status').className='status err'; $('status').textContent='Không có libil2cpp.so — cần split_config.arm64_v8a.apk.'; return; }
+  if (!mdEntry) { $('status').className='status err'; $('status').textContent='Không có global-metadata.dat — cần base.apk.'; return; }
+  state.so = await soEntry.async('uint8array'); state.soName = soEntry.name.split('/').pop();
+  state.md = await mdEntry.async('uint8array'); state.mdName = mdEntry.name.split('/').pop();
+  $('status').className='status ok';
+  $('status').textContent = `✓ Tách xong: ${state.soName} (${(state.so.length/1024/1024).toFixed(1)}MB) + ${state.mdName} (${(state.md.length/1024).toFixed(0)}KB)`;
 }
 
-// ====== Link fetch qua CORS proxy ======
+// ====== Link ======
 $('btnFetch').onclick = async () => {
   const url = $('url').value.trim();
   if (!url) return;
   const prog = $('prog'), bar = $('progBar');
   prog.classList.add('active'); bar.style.width = '0%';
-  $('status').className = 'status';
-  $('status').textContent = 'Đang tải qua proxy...';
-
-  // Thử lần lượt các proxy công khai
+  $('status').className='status'; $('status').textContent='Tải qua proxy...';
   const proxies = [
     u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     u => `https://thingproxy.freeboard.io/fetch/${u}`,
   ];
-
   let lastErr = null;
   for (const p of proxies) {
     try {
       const res = await fetch(p(url));
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      // đọc stream để có progress
       const reader = res.body.getReader();
-      const chunks = [];
-      let received = 0;
+      const chunks = []; let received = 0;
       const total = +res.headers.get('content-length') || 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
-        received += value.length;
+        chunks.push(value); received += value.length;
         if (total) bar.style.width = (received/total*100).toFixed(1) + '%';
       }
-      const buf = new Uint8Array(received);
-      let off = 0;
+      const buf = new Uint8Array(received); let off = 0;
       for (const c of chunks) { buf.set(c, off); off += c.length; }
-
-      // giả lập File object
-      const fakeName = url.split('/').pop().split('?')[0] || 'download.apk';
-      const fakeFile = new File([buf], fakeName);
-      if (fakeName.toLowerCase().endsWith('.apk')) {
-        await handleApk(fakeFile);
-      } else if (fakeName.toLowerCase().endsWith('.so')) {
-        state.so = buf; state.soName = fakeName;
-      } else if (fakeName.toLowerCase().endsWith('.dat')) {
-        state.md = buf; state.mdName = fakeName;
-      } else {
-        // thử coi như APK
-        await handleApk(fakeFile);
-      }
-      renderFileNames(); checkReady();
-      prog.classList.remove('active');
+      const name = url.split('/').pop().split('?')[0] || 'download.apk';
+      const fake = new File([buf], name);
+      if (name.toLowerCase().endsWith('.apk')) await handleApk(fake);
+      else if (name.toLowerCase().endsWith('.so')) { state.so = buf; state.soName = name; }
+      else if (name.toLowerCase().endsWith('.dat')) { state.md = buf; state.mdName = name; }
+      else await handleApk(fake);
+      renderNames(); checkReady(); prog.classList.remove('active');
       return;
-    } catch (e) {
-      lastErr = e;
-      bar.style.width = '0%';
-    }
+    } catch (e) { lastErr = e; bar.style.width = '0%'; }
   }
   prog.classList.remove('active');
-  $('status').className = 'status err';
-  $('status').textContent = 'Tải thất bại qua mọi proxy: ' + (lastErr?.message || 'unknown') + '. Thử kéo file tay.';
+  $('status').className='status err';
+  $('status').textContent = 'Tải thất bại: ' + (lastErr?.message || 'unknown');
 };
 
 // ====== Scan ======
@@ -253,102 +259,58 @@ function checkMetadataMagic(buf) {
   return (magic >>> 0) === 0xFAB11BAF;
 }
 
-function extractStrings(buf, minLen=4) {
-  const out = new Set();
-  let cur = [];
-  for (let i=0; i<buf.length; i++) {
-    const c = buf[i];
-    if (c >= 0x20 && c < 0x7f) cur.push(c);
-    else { if (cur.length >= minLen) out.add(String.fromCharCode(...cur)); cur = []; }
-  }
-  if (cur.length >= minLen) out.add(String.fromCharCode(...cur));
-  return out;
-}
-
-function parseMetadataStrings(buf) {
-  if (buf.length < 0x20) return [];
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const strOff = view.getUint32(0x18, true);
-  const strSize = view.getUint32(0x1C, true);
-  if (strOff + strSize > buf.length || strSize === 0) return [];
-  const strings = [];
-  let i = strOff;
-  const end = strOff + strSize;
-  while (i < end) {
-    let j = i;
-    while (j < end && buf[j] !== 0) j++;
-    if (j > i) {
-      let s = '';
-      for (let k=i; k<j; k++) if (buf[k] >= 0x20 && buf[k] < 0x7f) s += String.fromCharCode(buf[k]);
-      if (s.length >= 2) strings.push(s);
-    }
-    i = j + 1;
-  }
-  return strings;
-}
-
 $('btnScan').onclick = () => {
-  const kw = $('kw').value.trim().toLowerCase();
-  const out = $('out'), status = $('status'), countEl = $('count');
-  out.innerHTML = ''; countEl.textContent = '';
-  status.className = 'status';
-
-  if (!state.so || !state.md) { status.textContent='Thiếu file.'; status.className='status err'; return; }
-
+  if (!state.so || !state.md) return;
+  const kw = $('kw').value.trim();
   const validMeta = checkMetadataMagic(state.md);
-  if (!validMeta) {
-    status.textContent = '⚠ Metadata không có magic — có thể bị mã hóa. Fallback: scan string từ .so.';
-    status.className = 'status warn';
-  } else {
-    status.textContent = '✓ Metadata hợp lệ. Đang parse...';
-    status.className = 'status ok';
+  $('status').className = validMeta ? 'status ok' : 'status warn';
+  $('status').textContent = validMeta ? 'Đang scan...' : 'Metadata mã hóa — scan .so...';
+  $('out').innerHTML = ''; $('count').textContent = '';
+
+  // copy buffer sang worker (transferable)
+  const soCopy = state.so.slice();
+  const mdCopy = state.md.slice();
+  worker.postMessage({ so: soCopy, md: mdCopy, kw, validMeta }, [soCopy.buffer, mdCopy.buffer]);
+};
+
+worker.onmessage = (e) => {
+  const d = e.data;
+  if (d.type === 'progress') {
+    $('status').textContent = `Scan .so... ${d.pct}%`;
+    return;
   }
-
-  setTimeout(() => {
-    let classNames = validMeta ? parseMetadataStrings(state.md) : [];
-    const soStrings = extractStrings(state.so, 4);
-    const all = new Set([...classNames, ...soStrings]);
-
-    const matches = [];
-    for (const s of all) if (s.toLowerCase().includes(kw)) matches.push(s);
-    matches.sort((a,b) => a.length - b.length);
-
+  if (d.type === 'done') {
+    const { matches, total, classCount, elapsed } = d;
     if (!matches.length) {
-      status.textContent = `Không tìm thấy string chứa "${kw}".`;
-      status.className = 'status err';
+      $('status').className='status err';
+      $('status').textContent = `Không thấy string chứa "${$('kw').value}". (${elapsed.toFixed(0)}ms)`;
       return;
     }
-
-    countEl.textContent = `${matches.length} string khớp "${kw}" / ${all.size} tổng`;
-    status.textContent = validMeta ? '✓ Hoàn tất.' : '⚠ Hoàn tất (chỉ string .so).';
-    status.className = validMeta ? 'status ok' : 'status warn';
-
+    $('status').className='status ok';
+    $('status').textContent = `✓ Xong trong ${elapsed.toFixed(0)}ms`;
+    $('count').textContent = `${matches.length} khớp / ${total} tổng (metadata: ${classCount} string)`;
     const frag = document.createDocumentFragment();
     const MAX = 500;
     for (let i=0; i<Math.min(matches.length, MAX); i++) {
-      const d = document.createElement('div');
-      d.className = 'cls'; d.textContent = matches[i];
-      frag.appendChild(d);
+      const dv = document.createElement('div');
+      dv.className='cls'; dv.textContent = matches[i];
+      frag.appendChild(dv);
     }
     if (matches.length > MAX) {
-      const d = document.createElement('div');
-      d.className = 'ns';
-      d.textContent = `... và ${matches.length-MAX} nữa (cắt bớt)`;
-      frag.appendChild(d);
+      const more = document.createElement('div');
+      more.className='ns'; more.textContent = `... và ${matches.length-MAX} nữa`;
+      frag.appendChild(more);
     }
-    out.appendChild(frag);
-  }, 50);
+    $('out').appendChild(frag);
+  }
 };
 
 $('btnClear').onclick = () => {
-  state.so = state.md = null;
-  state.apkName = state.soName = state.mdName = '';
-  $('name').textContent = '';
-  drop.classList.remove('ok');
+  state.so = state.md = null; state.apkName = state.soName = state.mdName = '';
+  $('name').textContent = ''; drop.classList.remove('ok');
   $('out').innerHTML = ''; $('count').textContent = '';
-  $('status').textContent = 'Chưa có file.'; $('status').className = 'status';
-  $('btnScan').disabled = true;
-  fileInput.value = ''; $('url').value = '';
+  $('status').textContent = 'Chưa có file.'; $('status').className='status';
+  $('btnScan').disabled = true; fileInput.value = ''; $('url').value = '';
 };
 $('kw').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('btnScan').disabled) $('btnScan').click(); });
 </script>
